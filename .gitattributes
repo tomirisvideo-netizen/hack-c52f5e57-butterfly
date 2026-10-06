@@ -1,3 +1,7 @@
+# Keep formatter and shell checks reproducible after a Windows checkout.
+*.go text eol=lf
+*.sh text eol=lf
+
 # Preserve upstream vendor code and license files byte-for-byte.
 frontend/vendor/** -whitespace
 butterfly/assets/fonts/LICENSE.txt -whitespace

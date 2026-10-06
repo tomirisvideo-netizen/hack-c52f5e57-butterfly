@@ -298,13 +298,21 @@ func extract(ctx context.Context, segments []any, date string) (string, []any, e
 	return validateExtraction(payload, segments)
 }
 
-func (a *App) process(r *http.Request, owner string, meeting map[string]any) error {
+func (a *App) beginProcessing(owner string, meeting map[string]any) error {
 	meeting["status"] = "processing"
 	delete(meeting, "error")
 	addEvent(meeting, "processing", "Началась обработка встречи.")
-	if err := a.Save(owner, meeting); err != nil {
+	return a.Save(owner, meeting)
+}
+
+func (a *App) process(r *http.Request, owner string, meeting map[string]any) error {
+	if err := a.beginProcessing(owner, meeting); err != nil {
 		return err
 	}
+	return a.finishProcessing(r, owner, meeting)
+}
+
+func (a *App) finishProcessing(r *http.Request, owner string, meeting map[string]any) error {
 	var processingErr error
 	select {
 	case a.processing <- struct{}{}:

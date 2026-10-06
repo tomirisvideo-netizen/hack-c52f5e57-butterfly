@@ -364,16 +364,25 @@ func (a *App) confirmMeeting(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) retryMeeting(w http.ResponseWriter, r *http.Request) {
 	a.mutationMu.Lock()
-	defer a.mutationMu.Unlock()
 	owner, meeting, ok := a.owned(w, r)
 	if !ok {
+		a.mutationMu.Unlock()
 		return
 	}
 	if meeting["mode"] == "demo" || meeting["status"] == "processing" || meeting["status"] == "completed" {
+		a.mutationMu.Unlock()
 		fail(w, 409, "Для этой встречи повторная обработка недоступна.")
 		return
 	}
-	if err := a.process(r, owner, meeting); err != nil {
+	// Reserve this meeting under the mutation lock, then release it before
+	// waiting for ASR/LLM so other meetings can still be reviewed or deleted.
+	err := a.beginProcessing(owner, meeting)
+	a.mutationMu.Unlock()
+	if err != nil {
+		fail(w, 500, "Не удалось сохранить обработку.")
+		return
+	}
+	if err := a.finishProcessing(r, owner, meeting); err != nil {
 		fail(w, 500, "Не удалось сохранить обработку.")
 		return
 	}

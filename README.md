@@ -8,6 +8,17 @@ Go-приложение: загрузка записи или текста, по
 
 Требуются Go 1.27+, Python 3.10+ для локального экспорта.
 
+### Windows (PowerShell)
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
+.\scripts\run.ps1
+```
+
+### Linux / macOS
+
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
@@ -17,11 +28,23 @@ cp .env.example .env
 
 Открыть `http://127.0.0.1:8000`, нажать «Демо». Данные явно помечены синтетическими.
 Для готовых MCP/Fly указать `HACKALEM_HOME` — каталог установленного HackAlem
-с `bin/hackalem-mcp` и `bin/hackalem-demo-api`. Через MCP выполняются маршрутизация,
+с `bin/hackalem-mcp` и `bin/hackalem-demo-api` (на Windows — файлы `.exe`). Через MCP выполняются маршрутизация,
 анонимный отчёт проверки, обратная связь Fly и явная отправка статуса в Telegram.
 
 Основной backend написан на Go. Python используется только для PDF/DOCX и
 совместимости с установленным Riva SDK, а не как HTTP-сервер.
+
+Если `BUTTERFLY_EXPORT_PYTHON` и `RIVA_PYTHON` пусты, приложение автоматически
+использует Python из `.venv/Scripts` на Windows и `.venv/bin` на Linux/macOS.
+При обновлении старого `.env` удалите значения `.venv/bin/python` / `python3`
+из этих двух переменных, если они не соответствуют вашей системе. Для Riva
+нужен отдельный установленный SDK и доступный сервер; обычные зависимости
+экспорта его не устанавливают.
+
+HackAlem подключается из внешнего каталога и не обновляется командой `pip install`.
+После обновления его исходников пересоберите **оба** исполняемых файла: старый
+`hackalem-demo-api` может отвечать на healthcheck, но не содержать `/mb-3d`.
+Butterfly проверяет совместимость страницы перед показом Fly.
 
 ## Nemotron на Brev
 
@@ -44,12 +67,18 @@ Telegram требует серверные `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHA
 
 ## Проверки
 
+Полная проверка на Windows: `.\scripts\check.ps1`; на Linux/macOS:
+`sh scripts/check.sh`. Включает сборку, vet, Go race detector, Python-экспорт,
+совместимость зависимостей и регрессионные тесты интерфейса. Для Go race detector
+на Windows нужен доступный C-компилятор (например, GCC).
+
 ```bash
 go test ./...
 go vet ./...
 .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest -q
 node --check frontend/app.js
+node --test tests/test_frontend.cjs
 # При запущенном сервере, без отправки сообщений в Telegram:
 node scripts/smoke.mjs
 ```

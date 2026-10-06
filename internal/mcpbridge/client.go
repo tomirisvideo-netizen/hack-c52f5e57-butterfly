@@ -112,6 +112,15 @@ func New(ctx context.Context, binary, repoRoot string) (*Client, error) {
 		c.Close()
 		return nil, fmt.Errorf("initialize MCP: %w", err)
 	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.Close()
+		case <-c.exited:
+			_ = c.Close()
+		case <-c.done:
+		}
+	}()
 	return c, nil
 }
 
@@ -256,6 +265,7 @@ func (c *Client) Call(ctx context.Context, tool string, args map[string]any) (ma
 		return nil, err
 	}
 	var result struct {
+		IsError bool `json:"isError"`
 		Content []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
@@ -275,9 +285,27 @@ func (c *Client) Call(ctx context.Context, tool string, args map[string]any) (ma
 		if status, ok := envelope["status"].(string); !ok || status == "" {
 			return nil, errors.New("MCP envelope has no status")
 		}
+		if result.IsError {
+			return envelope, errors.New("MCP tool reported an error")
+		}
 		return envelope, nil
 	}
 	return nil, errors.New("MCP tool returned no text envelope")
+}
+
+// Running reports whether the initialized transport and child are still open.
+func (c *Client) Running() bool {
+	if c == nil {
+		return false
+	}
+	select {
+	case <-c.done:
+		return false
+	case <-c.exited:
+		return false
+	default:
+		return true
+	}
 }
 
 // Close is idempotent and interrupts pending reads/writes before reaping the child.
