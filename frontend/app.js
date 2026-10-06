@@ -49,14 +49,16 @@
   const processing = new Set(['queued','extracting','processing']);
   let storedApi = '';
   try { storedApi = localStorage.getItem('butterfly_api_url') || ''; } catch (_) { /* Storage can be disabled. */ }
-  const state = {api:storedApi.replace(/\/$/,''),meetings:[],selected:null,draft:null,health:null,loading:true,loadingMeeting:false,error:'',tab:'actions',mobileOpen:false,exportOpen:false,busy:false,dirty:false,view:'meetings',notifications:{},meetingFilter:'all',meetingSearch:''};
+  const state = {api:storedApi.replace(/\/+$/,''),meetings:[],selected:null,draft:null,health:null,loading:true,loadingMeeting:false,error:'',tab:'actions',mobileOpen:false,exportOpen:false,busy:false,dirty:false,view:'meetings',notifications:{},meetingFilter:'all',meetingSearch:''};
   let pollTimer = null;
   let toastTimer = null;
   let loadVersion = 0;
+  let connectVersion = 0;
   let audioObjectUrl = null;
 
   function formatDate(value, options = {day:'numeric',month:'long'}) {
-    const date = new Date(value || Date.now());
+    // A meeting date is a calendar day; only timestamps should be converted from UTC.
+    const date = new Date(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00` : value || Date.now());
     return Number.isNaN(date.getTime()) ? String(value || '') : date.toLocaleDateString('ru-RU',options);
   }
   function timecode(value) {
@@ -104,17 +106,20 @@
     else state.meetings.unshift(meeting);
   }
   async function connect() {
+    const version = ++connectVersion;
     state.loading=true; state.error=''; render();
     try {
       await request('/api/session',{method:'POST'});
+      if(version!==connectVersion) return;
       const results = await Promise.allSettled([request('/api/meetings'),request('/health')]);
+      if(version!==connectVersion) return;
       if (results[0].status==='rejected') throw results[0].reason;
       const meetings = results[0].value;
       state.meetings=Array.isArray(meetings)?meetings:(meetings.meetings || []);
       state.health=results[1].status==='fulfilled'?results[1].value:null;
       state.loading=false; render();
       // Opening the workspace shows the meeting overview; samples are never auto-created.
-    } catch(error) { state.loading=false; state.error=error.message; render(); }
+    } catch(error) { if(version!==connectVersion) return;state.loading=false; state.error=error.message; render(); }
   }
   async function loadMeeting(id, quiet = false) {
     const version = ++loadVersion;
@@ -140,7 +145,7 @@
   }
   function schedulePoll(id,delay = 4000) {
     clearTimeout(pollTimer);
-    pollTimer=setTimeout(()=>{if(state.selected?.id===id && state.view==='meetings' && !document.hidden) loadMeeting(id,true);else if(state.selected?.id===id) schedulePoll(id,10000);},delay);
+    pollTimer=setTimeout(()=>{if(state.selected?.id===id && state.view==='meetings' && !state.busy && !document.hidden) loadMeeting(id,true);else if(state.selected?.id===id) schedulePoll(id,10000);},delay);
   }
   async function loadAudio(meeting) {
     try {
@@ -166,11 +171,12 @@
       <div class="main-content">${state.error?`<div class="error-banner" role="alert">${icon('help')}<p>${escape(state.error)}</p><button class="btn small secondary" data-action="reconnect">Повторить</button></div>`:''}${state.view==='fly'?flyDemoPage():state.loading || state.loadingMeeting?`<div class="loading-content"><div><div class="spinner"></div><p>${state.loadingMeeting?'Открываем встречу…':'Подключаем пространство…'}</p></div></div>`:state.selected?meetingPage():welcome()}<footer class="page-footer"><span class="footer-brand">butterfly · из разговора в ясный план</span><span>Создано для осмысленных встреч</span></footer></div></main>
     </div>`;
     if(audioObjectUrl && $('#meeting-audio')) $('#meeting-audio').src=audioObjectUrl;
+    if(state.busy) $('#app').querySelectorAll('button, input, textarea').forEach((control)=>{control.disabled=true;});
   }
   // The embedded Fly experience comes from the existing plugin. It is an
   // interaction experiment, not evidence of ASR accuracy or a clinical model.
   function flyDemoPage() {
-    return `<section class="fly-demo-page" aria-labelledby="fly-demo-title"><div class="page-heading"><div class="heading-copy"><p class="eyebrow">Лаборатория / Эксперимент</p><h1 id="fly-demo-title">Fly demo</h1><p class="fly-demo-description">Исследуйте интерактивное демо из плагина HackAlem.</p></div><button class="btn secondary" data-action="close-fly">${icon('close')} Вернуться к встречам</button></div><div class="notice fly-experiment">${icon('sparkle')}<span>Экспериментальная визуализация плагина. Она демонстрирует взаимодействие с Fly; качество распознавания речи проверяется отдельно.</span></div><div class="panel fly-demo-frame"><iframe src="/fly-demo" title="Fly demo — интерактивный эксперимент плагина HackAlem" referrerpolicy="same-origin" allow="fullscreen"></iframe></div><p class="fly-demo-help">Если демо недоступно, проверьте подключение инструментов в настройках. <button class="fly-link" data-action="settings">Открыть настройки ${icon('arrow')}</button></p></section>`;
+    return `<section class="fly-demo-page" aria-labelledby="fly-demo-title"><div class="page-heading"><div class="heading-copy"><p class="eyebrow">Лаборатория / Эксперимент</p><h1 id="fly-demo-title">Fly demo</h1><p class="fly-demo-description">Исследуйте интерактивное демо из плагина HackAlem.</p></div><button class="btn secondary" data-action="close-fly">${icon('close')} Вернуться к встречам</button></div><div class="notice fly-experiment">${icon('sparkle')}<span>Экспериментальная визуализация плагина. Она демонстрирует взаимодействие с Fly; качество распознавания речи проверяется отдельно.</span></div><div class="panel fly-demo-frame"><iframe src="${escape(url('/fly-demo'))}" title="Fly demo — интерактивный эксперимент плагина HackAlem" referrerpolicy="same-origin" allow="fullscreen"></iframe></div><p class="fly-demo-help">Если демо недоступно, проверьте подключение инструментов в настройках. <button class="fly-link" data-action="settings">Открыть настройки ${icon('arrow')}</button></p></section>`;
   }
   function providerCard() {
     const provider=state.health?.provider;
@@ -220,7 +226,7 @@
     const isConfirmed=action.status==='confirmed';
     const missing=[!String(action.owner || '').trim() && 'ответственный',!String(action.deadline || '').trim() && 'срок'].filter(Boolean);
     const segment=state.selected.transcript.find((item)=>item.id===action.segment_id);
-    return `<article class="action-card ${isConfirmed?'confirmed':'pending'}" id="action-${escape(action.id)}"><div class="action-card-number">${String(index+1).padStart(2,'0')}</div><div class="action-card-content"><div class="action-heading"><span class="badge ${isConfirmed?'green':'amber'}">${icon(isConfirmed?'circleCheck':'help')}${isConfirmed?'Подтверждено':'Нужна проверка'}</span><label class="sr-only" for="action-text-${index}">Формулировка поручения ${index+1}</label><textarea class="action-text" id="action-text-${index}" rows="1" data-field="text" data-index="${index}" placeholder="Что нужно сделать?">${escape(action.text)}</textarea></div><div class="action-fields"><label class="action-field"><span>${icon('person')} Ответственный</span><input data-field="owner" data-index="${index}" value="${escape(action.owner || '')}" placeholder="Назначить ответственного" aria-label="Ответственный за поручение ${index+1}" /></label><label class="action-field"><span>${icon('calendar')} Срок</span><input data-field="deadline" data-index="${index}" value="${escape(action.deadline || '')}" placeholder="Указать срок" aria-label="Срок поручения ${index+1}" /></label></div><div class="action-source-row">${action.evidence || action.segment_id?`<button class="evidence" data-action="evidence" data-id="${escape(action.segment_id || '')}" title="Открыть исходную реплику">${icon('quote')}<span>${escape(action.evidence || 'Открыть исходную реплику')}</span>${segment?`<time>${timecode(segment.start)}</time>`:icon('chevron')}</button>`:'<span class="evidence manual-evidence">Добавлено вручную · без привязанной цитаты</span>'}</div><div class="action-footer">${isConfirmed?`<span class="confirmed-label">${icon('check')} Проверено вами</span><button class="btn small secondary" data-action="unconfirm" data-index="${index}" ${state.busy?'disabled':''}>Изменить</button>`:`<span class="action-warning">${missing.length?`Не определены в записи: ${missing.join(', ')}`:'Проверьте формулировку и исходную реплику'}</span><button class="btn primary action-confirm" data-action="confirm-action" data-index="${index}" ${state.busy?'disabled':''}>Подтвердить</button>`}</div></div></article>`;
+    return `<article class="action-card ${isConfirmed?'confirmed':'pending'}" id="action-${escape(action.id)}"><div class="action-card-number">${String(index+1).padStart(2,'0')}</div><div class="action-card-content"><div class="action-heading"><span class="badge ${isConfirmed?'green':'amber'}">${icon(isConfirmed?'circleCheck':'help')}${isConfirmed?'Подтверждено':'Нужна проверка'}</span><label class="sr-only" for="action-text-${index}">Формулировка поручения ${index+1}</label><textarea class="action-text" id="action-text-${index}" rows="1" data-field="text" data-index="${index}" placeholder="Что нужно сделать?">${escape(action.text)}</textarea></div><div class="action-fields"><label class="action-field"><span>${icon('person')} Ответственный</span><input data-field="owner" data-index="${index}" value="${escape(action.owner || '')}" placeholder="Назначить ответственного" aria-label="Ответственный за поручение ${index+1}" /></label><label class="action-field"><span>${icon('calendar')} Срок</span><input type="date" data-field="deadline" data-index="${index}" value="${escape(action.deadline || '')}" placeholder="Указать срок" aria-label="Срок поручения ${index+1}" /></label></div><div class="action-source-row">${action.evidence || action.segment_id?`<button class="evidence" data-action="evidence" data-id="${escape(action.segment_id || '')}" title="Открыть исходную реплику">${icon('quote')}<span>${escape(action.evidence || 'Открыть исходную реплику')}</span>${segment?`<time>${timecode(segment.start)}</time>`:icon('chevron')}</button>`:'<span class="evidence manual-evidence">Добавлено вручную · без привязанной цитаты</span>'}</div><div class="action-footer">${isConfirmed?`<span class="confirmed-label">${icon('check')} Проверено вами</span><button class="btn small secondary" data-action="unconfirm" data-index="${index}" ${state.busy?'disabled':''}>Изменить</button>`:`<span class="action-warning">${missing.length?`Не определены в записи: ${missing.join(', ')}`:'Проверьте формулировку и исходную реплику'}</span><button class="btn primary action-confirm" data-action="confirm-action" data-index="${index}" ${state.busy?'disabled':''}>Подтвердить</button>`}</div></div></article>`;
   }
   function openMeetingDialog(file = null) {
     const prefill=$('#quick-title')?.value || (file?.name?file.name.replace(/\.[^.]+$/,''):'');
@@ -245,11 +251,13 @@
     setTimeout(()=>segment.classList.remove('highlight'),4000);
   }
   async function saveDraft({silent=false} = {}) {
-    if(!state.selected || !state.draft) return false;
+    if(state.busy || !state.selected || !state.draft) return false;
     const id=state.selected.id;
     const actions=state.draft.actions.map((action)=>({...action,text:String(action.text || '').trim(),owner:String(action.owner || '').trim(),deadline:String(action.deadline || '').trim()}));
     if(actions.some((action)=>!action.text)) { notify('Добавьте формулировку для каждой задачи.',true); return false; }
-    state.busy=true;
+    // Invalidate an earlier poll so its stale response cannot replace the saved draft.
+    loadVersion++;
+    state.busy=true;render();
     try {
       const result=await request(`/api/meetings/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify({summary:state.draft.summary || '',actions})});
       const meeting=result?.id?result:await request(`/api/meetings/${encodeURIComponent(id)}`);
@@ -261,6 +269,7 @@
   }
   async function createDemo() {
     if(state.busy) return;
+    if(state.dirty && !(await saveDraft({silent:true}))) return;
     state.busy=true;render();
     try {
       const result=await request('/api/demo',{method:'POST'});
@@ -294,13 +303,15 @@
     finally {state.busy=false;render();}
   }
   async function exportMeeting(format) {
+    if(state.busy || !state.selected) return;
+    const {id,title}=state.selected;
     if(format!=='json' && (state.selected?.status!=='completed' || state.dirty)){notify('PDF и DOCX доступны после подтверждения протокола.');return;}
     state.exportOpen=false;render();
     if(state.dirty && !(await saveDraft({silent:true}))) return;
     try {
-      const blob=await request(`/api/meetings/${encodeURIComponent(state.selected.id)}/export?format=${format}`,{blob:true});
+      const blob=await request(`/api/meetings/${encodeURIComponent(id)}/export?format=${format}`,{blob:true});
       const objectUrl=URL.createObjectURL(blob),link=document.createElement('a');
-      link.href=objectUrl;link.download=`${(state.selected.title || 'butterfly').replace(/[<>:"/\\|?*\u0000-\u001f]/g,'-').slice(0,90)}.${format}`;
+      link.href=objectUrl;link.download=`${(title || 'butterfly').replace(/[<>:"/\\|?*\u0000-\u001f]/g,'-').slice(0,90)}.${format}`;
       document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(objectUrl),10000);
       notify(`${format.toUpperCase()} готов к скачиванию`);
     } catch(error){notify(error.message,true);}
@@ -309,13 +320,14 @@
     const button=event.target.closest('[data-action]');
     if(!button || button.disabled) return;
     const action=button.dataset.action;
+    if(state.busy && action!=='close-dialog') return;
     if(action==='new') openMeetingDialog();
     else if(action==='settings' || action==='help') openSettings();
     else if(action==='close-dialog') button.closest('dialog').close();
     else if(action==='menu') {state.mobileOpen=!state.mobileOpen;render();}
     else if(action==='close-menu') {state.mobileOpen=false;render();}
     else if(action==='select') {if(state.dirty && !(await saveDraft({silent:true})))return;await loadMeeting(button.dataset.id);}
-    else if(action==='home') {state.view='meetings';if(state.dirty && !(await saveDraft({silent:true})))return;clearTimeout(pollTimer);loadVersion++;state.selected=null;state.draft=null;state.mobileOpen=false;render();}
+    else if(action==='home') {if(state.dirty && !(await saveDraft({silent:true})))return;state.view='meetings';clearTimeout(pollTimer);loadVersion++;state.selected=null;state.draft=null;state.loadingMeeting=false;state.mobileOpen=false;render();}
     else if(action==='fly-demo') {state.view='fly';state.mobileOpen=false;state.exportOpen=false;clearTimeout(pollTimer);render();$('#fly-demo-title')?.scrollIntoView({block:'start'});}
     else if(action==='close-fly') {state.view='meetings';render();if(state.selected && (processing.has(state.selected.status) || state.selected.status==='awaiting_provider'))schedulePoll(state.selected.id);}
     else if(action==='telegram-notify') await sendTelegramStatus();
@@ -338,6 +350,7 @@
     else if(action==='retry') {state.busy=true;render();try{await request(`/api/meetings/${encodeURIComponent(state.selected.id)}/retry`,{method:'POST'});await loadMeeting(state.selected.id);}catch(error){notify(error.message,true);}finally{state.busy=false;render();}}
   });
   document.addEventListener('input',(event)=>{
+    if(state.busy) return;
     if(event.target.id==='meeting-search'){state.meetingSearch=event.target.value;$('#meetings-table-container').innerHTML=meetingTable();return;}
     const field=event.target.dataset.field;
     if(!field || !state.draft)return;
@@ -358,6 +371,7 @@
   document.addEventListener('dragleave',(event)=>{event.target.closest('#quick-dropzone')?.classList.remove('drag-active');});
   document.addEventListener('drop',(event)=>{if(event.target.closest('#quick-dropzone')){event.preventDefault();event.target.closest('#quick-dropzone').classList.remove('drag-active');if(event.dataTransfer?.files?.[0])openMeetingDialog(event.dataTransfer.files[0]);}});
   document.addEventListener('submit',async(event)=>{
+    if(state.busy) {event.preventDefault();return;}
     if(event.target.id==='new-meeting-form') {
       event.preventDefault();
       const form=event.target,data=new FormData(form),file=data.get('file'),transcript=String(data.get('transcript') || '').trim();
@@ -367,16 +381,24 @@
       if(hasFile && transcript){errorEl.innerHTML='<p class="form-error">Выберите один источник: аудиофайл или текст встречи.</p>';return;}
       if(!hasFile)data.delete('file');
       if(!transcript)data.delete('transcript');
+      if(state.dirty && !(await saveDraft({silent:true}))) return;
+      state.busy=true;render();
       const submit=$('button[type="submit"]',form);submit.disabled=true;submit.textContent='Создаём встречу…';errorEl.innerHTML='';
       try {const result=await request('/api/meetings',{method:'POST',body:data});const meeting=result.meeting || result;if(!meeting.id)throw new Error('Сервер не вернул идентификатор встречи.');$('#meeting-dialog').close();state.dirty=false;await loadMeeting(meeting.id);notify('Встреча сохранена');}
       catch(error){errorEl.innerHTML=`<p class="form-error">${escape(error.message)}</p>`;}
-      finally{submit.disabled=false;submit.innerHTML=`${icon('arrow')} Создать встречу`;}
+      finally{state.busy=false;render();submit.disabled=false;submit.innerHTML=`${icon('arrow')} Создать встречу`;}
     } else if(event.target.id==='settings-form') {
       event.preventDefault();
-      const form=event.target,api=String(new FormData(form).get('api') || '').trim().replace(/\/$/,'');
-      try {if(api){const parsed=new URL(api);if(!['http:','https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash)throw new Error('Укажите HTTP(S)-адрес API без пароля, параметров и якоря.');}localStorage.setItem('butterfly_api_url',api);}
+      const form=event.target,api=String(new FormData(form).get('api') || '').trim().replace(/\/+$/,'');
+      try {if(api){const parsed=new URL(api);if(!['http:','https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash)throw new Error('Укажите HTTP(S)-адрес API без пароля, параметров и якоря.');}}
       catch(error){$('#settings-form-error').innerHTML=`<p class="form-error">${escape(error.message || 'Не удалось сохранить настройки.')}</p>`;return;}
-      clearTimeout(pollTimer);loadVersion++;state.api=api;state.selected=null;state.draft=null;state.dirty=false;state.health=null;state.meetings=[];$('#settings-dialog').close();await connect();
+      if(state.dirty && !(await saveDraft({silent:true}))) return;
+      let persistent=true;
+      try {localStorage.setItem('butterfly_api_url',api);} catch (_) {persistent=false;}
+      clearTimeout(pollTimer);loadVersion++;state.api=api;state.selected=null;state.draft=null;state.loadingMeeting=false;state.dirty=false;state.health=null;state.meetings=[];state.notifications={};
+      if(audioObjectUrl) URL.revokeObjectURL(audioObjectUrl);audioObjectUrl=null;
+      $('#settings-dialog').close();await connect();
+      if(!persistent) notify('Подключение применено для этой страницы. Браузер не разрешает сохранить адрес API.');
     }
   });
   document.addEventListener('keydown',(event)=>{if(event.target.matches('.meeting-tabs .tab') && ['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const tabs=[...document.querySelectorAll('.meeting-tabs .tab')],index=tabs.indexOf(event.target),next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;state.tab=tabs[next].dataset.tab;render();document.querySelector('.meeting-tabs [data-tab="'+state.tab+'"]')?.focus();}if((event.key==='Enter' || event.key===' ') && event.target.matches('label[for="quick-file"]')){event.preventDefault();$('#quick-file')?.click();}if(event.key==='Escape' && state.exportOpen){state.exportOpen=false;render();}});

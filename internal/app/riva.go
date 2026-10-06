@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -23,7 +24,10 @@ func transcribeRiva(ctx context.Context, path, language string) ([]any, error) {
 	}
 	python := strings.TrimSpace(os.Getenv("RIVA_PYTHON"))
 	if python == "" {
-		python = ".venv/bin/python"
+		python = filepath.Join(".venv", "bin", "python")
+		if runtime.GOOS == "windows" {
+			python = filepath.Join(".venv", "Scripts", "python.exe")
+		}
 	}
 	source, err := filepath.Abs(path)
 	if err != nil {

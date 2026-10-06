@@ -64,6 +64,9 @@ func helper(mode string) {
 		case "rpc-error":
 			fmt.Printf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-1,"message":"SECRET-NOT-LEAKED"}}`+"\n", request.ID)
 			continue
+		case "tool-error":
+			respond(request.ID, map[string]any{"isError": true, "content": []any{map[string]any{"type": "text", "text": `{"status":"ok","data":{"error":"SECRET-NOT-LEAKED"}}`}}})
+			continue
 		}
 		fmt.Println(`{"jsonrpc":"2.0","method":"notifications/progress","params":{}}`)
 		if mode == "bad-envelope" {
@@ -142,7 +145,7 @@ func TestConcurrentCallsAreSerialized(t *testing.T) {
 }
 
 func TestInvalidProcessRepliesFailCleanly(t *testing.T) {
-	for _, mode := range []string{"invalid", "wrong-id", "exit", "oversized", "rpc-error", "bad-envelope"} {
+	for _, mode := range []string{"invalid", "wrong-id", "exit", "oversized", "rpc-error", "tool-error", "bad-envelope"} {
 		t.Run(mode, func(t *testing.T) {
 			client := startHelper(t, mode)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -186,6 +189,27 @@ func TestInitializationAndCanceledContextsFail(t *testing.T) {
 	cancel()
 	if _, err := New(ctx, binary, t.TempDir()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("want canceled, got %v", err)
+	}
+}
+
+func TestOwnerCancellationReapsIdleProcess(t *testing.T) {
+	t.Setenv("MCPBRIDGE_TEST_HELPER", "normal")
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client, err := New(ctx, binary, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	cancel()
+	select {
+	case <-client.exited:
+	case <-time.After(time.Second):
+		t.Fatal("canceling owner left idle MCP process running")
 	}
 }
 

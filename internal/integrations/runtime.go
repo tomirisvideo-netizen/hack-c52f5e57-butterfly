@@ -26,6 +26,8 @@ type caller interface {
 }
 type Services struct {
 	ctx          context.Context
+	cancel       context.CancelFunc
+	closeOnce    sync.Once
 	client       caller
 	bridge       *mcpbridge.Client
 	demo         *exec.Cmd
@@ -41,7 +43,8 @@ type Services struct {
 
 // Start reuses the installed plugin with a separate, private project data root.
 func Start(ctx context.Context, dataDir string) *Services {
-	s := &Services{ctx: ctx, queue: make(chan func(), 64), workerDone: make(chan struct{})}
+	ctx, cancel := context.WithCancel(ctx)
+	s := &Services{ctx: ctx, cancel: cancel, queue: make(chan func(), 64), workerDone: make(chan struct{})}
 	go func() {
 		defer close(s.workerDone)
 		for {
@@ -49,17 +52,29 @@ func Start(ctx context.Context, dataDir string) *Services {
 			case <-ctx.Done():
 				return
 			case fn := <-s.queue:
-				fn()
+				if ctx.Err() == nil {
+					fn()
+				}
 			}
 		}
 	}()
-	s.root, _ = filepath.Abs(filepath.Join(dataDir, "hackalem"))
+	var err error
+	s.root, err = filepath.Abs(filepath.Join(dataDir, "hackalem"))
+	if err != nil {
+		s.errorMessage = "Не удалось определить приватный каталог MCP."
+		return s
+	}
 	home := os.Getenv("HACKALEM_HOME")
 	if home == "" {
 		s.errorMessage = "Укажите HACKALEM_HOME для готовых MCP и Fly demo."
 		return s
 	}
 	s.configured = true
+	home, err = filepath.Abs(home)
+	if err != nil {
+		s.errorMessage = "Не удалось определить каталог установленного HackAlem."
+		return s
+	}
 	if err := os.MkdirAll(s.root, 0700); err != nil {
 		s.errorMessage = "Не удалось создать приватный каталог MCP."
 		return s
@@ -86,7 +101,7 @@ func Start(ctx context.Context, dataDir string) *Services {
 	}
 	port := fmt.Sprint(l.Addr().(*net.TCPAddr).Port)
 	l.Close()
-	cmd := exec.Command(filepath.Join(home, "bin", "hackalem-demo-api"))
+	cmd := exec.CommandContext(ctx, filepath.Join(home, "bin", "hackalem-demo-api"))
 	cmd.Dir = s.root
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
@@ -120,12 +135,21 @@ func Start(ctx context.Context, dataDir string) *Services {
 		case <-ctx.Done():
 			return s
 		case <-s.demoDone:
+			s.errorMessage = "Процесс Fly demo завершился до готовности."
 			return s
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
 	if !ready {
 		s.errorMessage = "Fly demo не прошёл healthcheck."
+		_ = cmd.Process.Kill()
+		<-s.demoDone
+		return s
+	}
+	if !flyVisualizationReady(ctx, httpClient, target) {
+		s.errorMessage = "Fly demo не содержит совместимую страницу /mb-3d. Обновите бинарные файлы HackAlem."
+		_ = cmd.Process.Kill()
+		<-s.demoDone
 		return s
 	}
 	s.proxy = httputil.NewSingleHostReverseProxy(target)
@@ -160,28 +184,69 @@ func Start(ctx context.Context, dataDir string) *Services {
 	return s
 }
 
+func flyVisualizationReady(ctx context.Context, client *http.Client, target *url.URL) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String()+"/mb-3d", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK && strings.Contains(resp.Header.Get("Content-Type"), "text/html")
+}
+
 func success(result map[string]any, err error) bool {
 	return err == nil && result != nil && result["status"] == "ok"
 }
 func (s *Services) Health() map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return map[string]any{"configured": s.configured, "connected": s.client != nil, "fly_available": s.proxy != nil, "error": s.errorMessage}
+	connected := s.connected()
+	flyAvailable := s.proxy != nil && s.ctx.Err() == nil
+	if s.demoDone != nil {
+		select {
+		case <-s.demoDone:
+			flyAvailable = false
+		default:
+		}
+	}
+	errorMessage := s.errorMessage
+	if s.ctx.Err() != nil {
+		errorMessage = "Интеграции остановлены."
+	} else if s.client != nil && !connected {
+		errorMessage = "Соединение с MCP закрыто. Перезапустите приложение."
+	} else if s.proxy != nil && !flyAvailable {
+		errorMessage = "Процесс Fly demo остановлен. Перезапустите приложение."
+	}
+	return map[string]any{"configured": s.configured, "connected": connected, "fly_available": flyAvailable, "error": errorMessage}
+}
+func (s *Services) connected() bool {
+	return s.client != nil && s.ctx.Err() == nil && (s.bridge == nil || s.bridge.Running())
 }
 func (s *Services) TelegramConfigured() bool {
-	return s.client != nil && os.Getenv("TELEGRAM_BOT_TOKEN") != "" && os.Getenv("TELEGRAM_CHAT_ID") != ""
+	return s.connected() && strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")) != "" && strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID")) != ""
 }
 func (s *Services) Close() {
-	if s.demo != nil {
-		_ = s.demo.Process.Kill()
-		<-s.demoDone
-	}
-	if s.bridge != nil {
-		_ = s.bridge.Close()
-	}
+	s.closeOnce.Do(func() {
+		if s.cancel != nil {
+			s.cancel()
+		}
+		if s.demo != nil {
+			_ = s.demo.Process.Kill()
+			<-s.demoDone
+		}
+		if s.bridge != nil {
+			_ = s.bridge.Close()
+		}
+		if s.workerDone != nil {
+			<-s.workerDone
+		}
+	})
 }
 func (s *Services) enqueue(fn func()) {
-	if s.client == nil {
+	if !s.connected() {
 		return
 	}
 	select {

@@ -30,7 +30,8 @@ def run(source: Path, endpoint: str, language: str) -> dict:
 
     language = requested_language(language)
     demuxer = {".mp3": "mp3", ".wav": "wav", ".m4a": "mov", ".mp4": "mov",
-               ".ogg": "ogg", ".webm": "matroska", ".flac": "flac"}.get(source.suffix.lower())
+               ".ogg": "ogg", ".opus": "ogg", ".aac": "aac",
+               ".webm": "matroska", ".flac": "flac"}.get(source.suffix.lower())
     if not demuxer:
         raise ValueError("Unsupported audio format")
     ffmpeg = shutil.which("ffmpeg")

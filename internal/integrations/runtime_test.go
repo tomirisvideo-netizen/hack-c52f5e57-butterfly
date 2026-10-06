@@ -10,9 +10,11 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"butterfly/internal/app"
 )
@@ -190,5 +192,123 @@ func TestFlyProxyAllowsOnlyVisualizationRoutesWithSession(t *testing.T) {
 	}
 	if calls != 5 {
 		t.Fatalf("unexpected upstream requests: %d", calls)
+	}
+}
+
+func TestCloseStopsWorkerWithoutCancelingParent(t *testing.T) {
+	t.Setenv("HACKALEM_HOME", "")
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := Start(parent, t.TempDir())
+	s.Close()
+	s.Close()
+	select {
+	case <-s.workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close left the integration worker running")
+	}
+	if parent.Err() != nil {
+		t.Fatal("Close canceled the caller's context")
+	}
+}
+
+func TestHealthAndTelegramReflectCanceledRuntime(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "mock-token-never-sent")
+	t.Setenv("TELEGRAM_CHAT_ID", "mock-chat")
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Services{ctx: ctx, client: &recordedCaller{}, proxy: &httputil.ReverseProxy{}, configured: true}
+	cancel()
+	health := s.Health()
+	if health["connected"] != false || health["fly_available"] != false || health["error"] == "" {
+		t.Fatalf("stopped runtime advertised healthy integrations: %#v", health)
+	}
+	if s.TelegramConfigured() {
+		t.Fatal("stopped runtime advertised available Telegram")
+	}
+}
+
+func TestFlyCompatibilityRequiresVisualizationPage(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      int
+		contentType string
+		want        bool
+	}{
+		{"current page", http.StatusOK, "text/html; charset=utf-8", true},
+		{"old binary without page", http.StatusNotFound, "text/plain", false},
+		{"incompatible response", http.StatusOK, "application/json", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/mb-3d" {
+					t.Errorf("unexpected compatibility probe: %s", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", tc.contentType)
+				w.WriteHeader(tc.status)
+			}))
+			defer server.Close()
+			target, _ := url.Parse(server.URL)
+			if got := flyVisualizationReady(context.Background(), server.Client(), target); got != tc.want {
+				t.Fatalf("visualization readiness = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInstalledHackAlemRuntime(t *testing.T) {
+	home := os.Getenv("HACKALEM_TEST_HOME")
+	if home == "" {
+		t.Skip("set HACKALEM_TEST_HOME for installed MCP/Fly smoke")
+	}
+	t.Setenv("HACKALEM_HOME", home)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := Start(ctx, t.TempDir())
+	defer s.Close()
+	if health := s.Health(); health["connected"] != true || health["fly_available"] != true {
+		t.Fatalf("installed integrations did not start: %#v", health)
+	}
+	// Only synthetic metadata and a local report are sent to the private MCP root.
+	// Telegram is deliberately excluded from this installed-runtime smoke test.
+	for _, call := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"system.capabilities", nil},
+		{"routing.fly_recommend", map[string]any{"task": auditTask, "available_capabilities": []string{"reports.create"}, "input_metadata": map[string]any{"type": "meeting_review", "mode": "demo"}}},
+		{"reports.create", map[string]any{"title": "Synthetic Butterfly compatibility test", "format": "md", "sections": []map[string]string{{"heading": "Local smoke", "body": "Synthetic metadata only."}}}},
+		{"routing.fly_feedback", map[string]any{"task": auditTask, "chosen": []string{"reports.create"}, "source": "normal-teacher", "input_metadata": map[string]any{"type": "meeting_review", "mode": "demo"}}},
+	} {
+		result, err := s.call(call.tool, call.args)
+		if !success(result, err) {
+			t.Fatalf("installed %s: status=%v, err=%v", call.tool, result["status"], err)
+		}
+	}
+	a, err := app.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	a.Register(mux)
+	s.Register(mux, a)
+	cookie := testSession(t, mux)
+	for _, path := range []string{"/fly-demo", "/fly-events", "/fly-feedback", "/fly-neuron-events"} {
+		w := serveTest(mux, "GET", path, cookie, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("installed Fly %s returned %d", path, w.Code)
+		}
+		if path == "/fly-demo" && (!strings.Contains(w.Body.String(), "/vendor/three.module.js") || strings.Contains(w.Body.String(), "https://cdn.jsdelivr.net/")) {
+			t.Fatal("Fly demo did not use the local Three.js module")
+		}
+	}
+	cancel()
+	select {
+	case <-s.demoDone:
+	case <-time.After(time.Second):
+		t.Fatal("canceling runtime left the Fly process running")
+	}
+	s.Close()
+	if health := s.Health(); health["connected"] != false || health["fly_available"] != false {
+		t.Fatalf("closed runtime advertised healthy integrations: %#v", health)
 	}
 }
